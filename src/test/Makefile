@@ -192,6 +192,7 @@ osd_unittest_SRC := \
 		$(USER_DIR)/common/maths.c \
 		$(USER_DIR)/common/printf.c \
 		$(USER_DIR)/common/time.c \
+		$(USER_DIR)/common/filter.c \
 		$(USER_DIR)/fc/runtime_config.c
 
 osd_unittest_DEFINES := \
@@ -278,6 +279,8 @@ scheduler_unittest_SRC := \
 		$(USER_DIR)/common/crc.c \
 		$(USER_DIR)/common/streambuf.c
 
+scheduler_unittest_DEFINES := \
+		USE_OSD= 
 
 sensor_gyro_unittest_SRC := \
 		$(USER_DIR)/sensors/gyro.c \
@@ -415,8 +418,38 @@ rx_spi_spektrum_unittest_SRC := \
 		$(USER_DIR)/rx/cyrf6936_spektrum.c
 
 rx_spi_spektrum_unittest_DEFINES := \
-		USE_RX_SPI \
-		USE_RX_SPEKTRUM
+		USE_RX_SPI= \
+		USE_RX_SPEKTRUM=
+
+rx_spi_expresslrs_unittest_SRC := \
+        $(USER_DIR)/pg/rx_spi_expresslrs.c \
+		$(USER_DIR)/rx/expresslrs_common.c \
+		$(USER_DIR)/rx/expresslrs.c \
+		$(USER_DIR)/build/atomic.c \
+
+rx_spi_expresslrs_unittest_DEFINES := \
+		USE_RX_SPI= \
+		USE_RX_EXPRESSLRS= \
+		USE_RX_SX1280= \
+		USE_RX_SX127X= \
+
+rx_spi_expresslrs_telemetry_unittest_SRC := \
+		$(USER_DIR)/rx/crsf.c \
+		$(USER_DIR)/telemetry/crsf.c \
+		$(USER_DIR)/common/crc.c \
+		$(USER_DIR)/common/maths.c \
+		$(USER_DIR)/common/streambuf.c \
+		$(USER_DIR)/common/gps_conversion.c \
+		$(USER_DIR)/common/printf.c \
+		$(USER_DIR)/common/typeconversion.c \
+		$(USER_DIR)/rx/expresslrs_telemetry.c \
+		$(USER_DIR)/build/atomic.c \
+		$(USER_DIR)/telemetry/msp_shared.c \
+
+rx_spi_expresslrs_telemetry_unittest_DEFINES := \
+		USE_RX_EXPRESSLRS= \
+		USE_GPS= \
+		USE_MSP_OVER_TELEMETRY= \
 
 # Please tweak the following variable definitions as needed by your
 # project, except GTEST_HEADERS, which you can use in your own targets
@@ -462,28 +495,19 @@ CXX_VERSION = $(shell $(CXX) -dumpversion)
 
 ifeq ($(shell $(CC) -v 2>&1 | grep -q "clang version" && echo "clang"),clang)
 
-# Please revisit versions when new clang version arrive. Supported versions: { Linux: 7 - 11; OSX: 7- 12 }
+# Please revisit versions when new clang version arrive. Supported versions: { Linux / OSX: 7 - 13 }
 # Travis reports CC_VERSION of 4.2.1
 CC_VERSION_MAJOR := $(firstword $(subst ., ,$(CC_VERSION)))
 CC_VERSION_CHECK_MIN := 7
-CC_VERSION_CHECK_MAX := 11
+CC_VERSION_CHECK_MAX := 13
 
-# Added flags for clang 11 (linux) are not backwards compatible:
-# -fcommon
-# -Wno-void-pointer-to-int-cast
-
-ifneq ($(OSFAMILY), macosx)
-ifeq ($(CC_VERSION_MAJOR), 11)
+# Added flags for clang 11 - 13 are not backwards compatible
+ifeq ($(shell expr $(CC_VERSION_MAJOR) \> 10 \& $(CC_VERSION_MAJOR) \< 14), 1)
 COMMON_FLAGS += \
 	-fcommon \
 	-Wno-void-pointer-to-int-cast
 endif
-endif
 
-ifeq ($(OSFAMILY), macosx)
-# MacOS comes with Apple's own flavour of clang that does not adhere to the official versioning
-CC_VERSION_CHECK_MAX := 12
-endif
 ifeq ($(shell expr $(CC_VERSION_MAJOR) \< $(CC_VERSION_CHECK_MIN) \| $(CC_VERSION_MAJOR) \> $(CC_VERSION_CHECK_MAX)),1)
 $(error $(CC) $(CC_VERSION) is not supported. The officially supported version of clang is 'clang-10'. If this is not found, 'clang' is used as a fallback. The version of the compiler must be between $(CC_VERSION_CHECK_MIN) and $(CC_VERSION_CHECK_MAX).)
 endif

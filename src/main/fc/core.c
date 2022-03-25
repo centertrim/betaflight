@@ -61,8 +61,8 @@
 #include "flight/failsafe.h"
 #include "flight/gps_rescue.h"
 
-#if defined(USE_GYRO_DATA_ANALYSE)
-#include "flight/gyroanalyse.h"
+#if defined(USE_DYN_NOTCH_FILTER)
+#include "flight/dyn_notch_filter.h"
 #endif
 
 #include "flight/imu.h"
@@ -550,7 +550,7 @@ void tryArm(void)
         }
         imuQuaternionHeadfreeOffsetSet();
 
-#if defined(USE_GYRO_DATA_ANALYSE)
+#if defined(USE_DYN_NOTCH_FILTER)
         resetMaxFFT();
 #endif
 
@@ -767,7 +767,6 @@ bool processRx(timeUs_t currentTimeUs)
     if (currentTimeUs > FAILSAFE_POWER_ON_DELAY_US && !failsafeIsMonitoring()) {
         failsafeStartMonitoring();
     }
-    failsafeUpdateState();
 
     const throttleStatus_e throttleStatus = calculateThrottleStatus();
     const uint8_t throttlePercent = calculateThrottlePercentAbs();
@@ -1269,6 +1268,14 @@ FAST_CODE bool pidLoopReady(void)
     return false;
 }
 
+FAST_CODE bool rxFrameReady(void)
+{
+    if ((activePidLoopDenom == 1) || (pidUpdateCounter % activePidLoopDenom == 0)) {
+        return true;
+    }
+    return false;
+}
+
 FAST_CODE void taskFiltering(timeUs_t currentTimeUs)
 {
     gyroFiltering(currentTimeUs);
@@ -1295,10 +1302,8 @@ FAST_CODE void taskMainPidLoop(timeUs_t currentTimeUs)
     subTaskMotorUpdate(currentTimeUs);
     subTaskPidSubprocesses(currentTimeUs);
 
-    if (debugMode == DEBUG_CYCLETIME) {
-        DEBUG_SET(DEBUG_CYCLETIME, 0, getTaskDeltaTimeUs(TASK_SELF));
-        DEBUG_SET(DEBUG_CYCLETIME, 1, getAverageSystemLoadPercent());
-    }
+    DEBUG_SET(DEBUG_CYCLETIME, 0, getTaskDeltaTimeUs(TASK_SELF));
+    DEBUG_SET(DEBUG_CYCLETIME, 1, getAverageSystemLoadPercent());
 }
 
 bool isFlipOverAfterCrashActive(void)

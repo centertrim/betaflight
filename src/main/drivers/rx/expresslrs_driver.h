@@ -18,17 +18,27 @@
  * If not, see <http://www.gnu.org/licenses/>.
  */
 
+/*
+ * Author: Dominic Clifton / Seriously Pro Racing
+ */
+
 #pragma once
 
-#include "drivers/bus.h"
+void expressLrsInitialiseTimer(TIM_TypeDef *timer, timerOvrHandlerRec_t *timerUpdateCb);
+void expressLrsTimerEnableIRQs(void);
+void expressLrsUpdateTimerInterval(uint16_t intervalUs);
+void expressLrsUpdatePhaseShift(int32_t newPhaseShift);
+void expressLrsOnTimerTickISR(void);
+void expressLrsOnTimerTockISR(void);
 
-bool icm42605AccDetect(accDev_t *acc);
-bool icm42605GyroDetect(gyroDev_t *gyro);
+void expressLrsTimerIncreaseFrequencyOffset(void);
+void expressLrsTimerDecreaseFrequencyOffset(void);
+void expressLrsTimerResetFrequencyOffset(void);
 
-void icm42605AccInit(accDev_t *acc);
-void icm42605GyroInit(gyroDev_t *gyro);
+void expressLrsTimerStop(void);
+void expressLrsTimerResume(void);
 
-uint8_t icm42605SpiDetect(const busDevice_t *bus);
+bool expressLrsTimerIsRunning(void);
 
-bool icm42605SpiAccDetect(accDev_t *acc);
-bool icm42605SpiGyroDetect(gyroDev_t *gyro);
+void expressLrsTimerDebug(void);
+

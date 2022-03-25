@@ -49,10 +49,13 @@ void sdftInit(sdft_t *sdft, const int startBin, const int endBin, const int numB
     }
 
     sdft->idx = 0;
-    sdft->startBin = startBin;
-    sdft->endBin = endBin;
-    sdft->numBatches = numBatches;
-    sdft->batchSize = (sdft->endBin - sdft->startBin + 1) / sdft->numBatches + 1;
+
+    // Add 1 bin on either side outside of range (if possible) to get proper windowing up to range limits
+    sdft->startBin = constrain(startBin - 1, 0, SDFT_BIN_COUNT - 1);
+    sdft->endBin = constrain(endBin + 1, sdft->startBin, SDFT_BIN_COUNT - 1);
+
+    sdft->numBatches = MAX(numBatches, 1);
+    sdft->batchSize = (sdft->endBin - sdft->startBin) / sdft->numBatches + 1;  // batchSize = ceil(numBins / numBatches)
 
     for (int i = 0; i < SDFT_SAMPLE_SIZE; i++) {
         sdft->samples[i] = 0.0f;

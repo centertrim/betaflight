@@ -64,11 +64,12 @@ float rcCommandDelta[XYZ_AXIS_COUNT];
 #endif
 static float rawSetpoint[XYZ_AXIS_COUNT];
 static float setpointRate[3], rcDeflection[3], rcDeflectionAbs[3];
-static float throttlePIDAttenuation;
+static float rcDeflectionSmoothed[3];
 static bool reverseMotors = false;
 static applyRatesFn *applyRates;
 static uint16_t currentRxRefreshRate;
 static bool isRxDataNew = false;
+static bool isRxRateValid = false;
 static float rcCommandDivider = 500.0f;
 static float rcCommandYawDivider = 500.0f;
 
@@ -82,14 +83,15 @@ enum {
 };
 
 #ifdef USE_RC_SMOOTHING_FILTER
+#define RC_SMOOTHING_CUTOFF_MIN_HZ              15    // Minimum rc smoothing cutoff frequency
 #define RC_SMOOTHING_FILTER_STARTUP_DELAY_MS    5000  // Time to wait after power to let the PID loop stabilize before starting average frame rate calculation
 #define RC_SMOOTHING_FILTER_TRAINING_SAMPLES    50    // Number of rx frame rate samples to average during initial training
 #define RC_SMOOTHING_FILTER_RETRAINING_SAMPLES  20    // Number of rx frame rate samples to average during frame rate changes
 #define RC_SMOOTHING_FILTER_TRAINING_DELAY_MS   1000  // Additional time to wait after receiving first valid rx frame before initial training starts
 #define RC_SMOOTHING_FILTER_RETRAINING_DELAY_MS 2000  // Guard time to wait after retraining to prevent retraining again too quickly
 #define RC_SMOOTHING_RX_RATE_CHANGE_PERCENT     20    // Look for samples varying this much from the current detected frame rate to initiate retraining
-#define RC_SMOOTHING_RX_RATE_MIN_US             1000  // 1ms
-#define RC_SMOOTHING_RX_RATE_MAX_US             50000 // 50ms or 20hz
+#define RC_SMOOTHING_RX_RATE_MIN_US             950   // 0.950ms to fit 1kHz without an issue
+#define RC_SMOOTHING_RX_RATE_MAX_US             65500 // 65.5ms or 15.26hz
 #define RC_SMOOTHING_FEEDFORWARD_INITIAL_HZ     100 // The value to use for "auto" when interpolated feedforward is enabled
 
 static FAST_DATA_ZERO_INIT rcSmoothingFilter_t rcSmoothingData;
@@ -106,24 +108,26 @@ bool getShouldUpdateFeedforward()
 }
 
 float getSetpointRate(int axis)
-// only used in pid.c to provide setpointRate for the crash recovery function
 {
+#ifdef USE_RC_SMOOTHING_FILTER
     return setpointRate[axis];
+#else
+    return rawSetpoint[axis];
+#endif
 }
 
 float getRcDeflection(int axis)
 {
+#ifdef USE_RC_SMOOTHING_FILTER
+    return rcDeflectionSmoothed[axis];
+#else
     return rcDeflection[axis];
+#endif
 }
 
 float getRcDeflectionAbs(int axis)
 {
     return rcDeflectionAbs[axis];
-}
-
-float getThrottlePIDAttenuation(void)
-{
-    return throttlePIDAttenuation;
 }
 
 #ifdef USE_FEEDFORWARD
@@ -135,6 +139,11 @@ float getRawSetpoint(int axis)
 float getRcCommandDelta(int axis)
 {
     return rcCommandDelta[axis];
+}
+
+bool getRxRateValid(void)
+{
+    return isRxRateValid;
 }
 #endif
 
@@ -236,7 +245,7 @@ float applyCurve(int axis, float deflection)
     return applyRates(axis, deflection, fabsf(deflection));
 }
 
-static void scaleSetpointToFpvCamAngle(void)
+static void scaleRawSetpointToFpvCamAngle(void)
 {
     //recalculate sin/cos only when rxConfig()->fpvCamAngleDegrees changed
     static uint8_t lastFpvCamAngleDegrees = 0;
@@ -249,10 +258,10 @@ static void scaleSetpointToFpvCamAngle(void)
         sinFactor = sin_approx(rxConfig()->fpvCamAngleDegrees * RAD);
     }
 
-    float roll = setpointRate[ROLL];
-    float yaw = setpointRate[YAW];
-    setpointRate[ROLL] = constrainf(roll * cosFactor -  yaw * sinFactor, -SETPOINT_RATE_LIMIT * 1.0f, SETPOINT_RATE_LIMIT * 1.0f);
-    setpointRate[YAW]  = constrainf(yaw  * cosFactor + roll * sinFactor, -SETPOINT_RATE_LIMIT * 1.0f, SETPOINT_RATE_LIMIT * 1.0f);
+    float roll = rawSetpoint[ROLL];
+    float yaw = rawSetpoint[YAW];
+    rawSetpoint[ROLL] = constrainf(roll * cosFactor -  yaw * sinFactor, -SETPOINT_RATE_LIMIT * 1.0f, SETPOINT_RATE_LIMIT * 1.0f);
+    rawSetpoint[YAW]  = constrainf(yaw  * cosFactor + roll * sinFactor, -SETPOINT_RATE_LIMIT * 1.0f, SETPOINT_RATE_LIMIT * 1.0f);
 }
 
 #define THROTTLE_BUFFER_MAX 20
@@ -293,7 +302,8 @@ void updateRcRefreshRate(timeUs_t currentTimeUs)
         refreshRateUs = cmpTimeUs(currentTimeUs, lastRxTimeUs); // calculate a delta here if not supplied by the protocol
     }
     lastRxTimeUs = currentTimeUs;
-    currentRxRefreshRate = constrain(refreshRateUs, 1000, 30000);
+    isRxRateValid = (refreshRateUs >= RC_SMOOTHING_RX_RATE_MIN_US && refreshRateUs <= RC_SMOOTHING_RX_RATE_MAX_US);
+    currentRxRefreshRate = constrain(refreshRateUs, RC_SMOOTHING_RX_RATE_MIN_US, RC_SMOOTHING_RX_RATE_MAX_US);
 }
 
 uint16_t getCurrentRxRefreshRate(void)
@@ -315,13 +325,6 @@ FAST_CODE_NOINLINE int calcAutoSmoothingCutoff(int avgRxFrameTimeUs, uint8_t aut
     }
 }
 
-// Preforms a reasonableness check on the rx frame time to avoid bad data
-// skewing the average.
-static FAST_CODE bool rcSmoothingRxRateValid(int currentRxRefreshRate)
-{
-    return (currentRxRefreshRate >= RC_SMOOTHING_RX_RATE_MIN_US && currentRxRefreshRate <= RC_SMOOTHING_RX_RATE_MAX_US);
-}
-
 // Initialize or update the filters base on either the manually selected cutoff, or
 // the auto-calculated cutoff frequency based on detected rx frame rate.
 FAST_CODE_NOINLINE void rcSmoothingSetFilterCutoffs(rcSmoothingFilter_t *smoothingData)
@@ -330,12 +333,11 @@ FAST_CODE_NOINLINE void rcSmoothingSetFilterCutoffs(rcSmoothingFilter_t *smoothi
     uint16_t oldCutoff = smoothingData->setpointCutoffFrequency;
 
     if (smoothingData->setpointCutoffSetting == 0) {
-        smoothingData->setpointCutoffFrequency = calcAutoSmoothingCutoff(smoothingData->averageFrameTimeUs, smoothingData->autoSmoothnessFactorSetpoint);
+        smoothingData->setpointCutoffFrequency = MAX(RC_SMOOTHING_CUTOFF_MIN_HZ, calcAutoSmoothingCutoff(smoothingData->averageFrameTimeUs, smoothingData->autoSmoothnessFactorSetpoint));
     }
     if (smoothingData->throttleCutoffSetting == 0) {
-        smoothingData->throttleCutoffFrequency = calcAutoSmoothingCutoff(smoothingData->averageFrameTimeUs, smoothingData->autoSmoothnessFactorThrottle);
+        smoothingData->throttleCutoffFrequency = MAX(RC_SMOOTHING_CUTOFF_MIN_HZ, calcAutoSmoothingCutoff(smoothingData->averageFrameTimeUs, smoothingData->autoSmoothnessFactorThrottle));
     }
-
 
     // initialize or update the Setpoint filter
     if ((smoothingData->setpointCutoffFrequency != oldCutoff) || !smoothingData->filterInitialized) {
@@ -354,12 +356,21 @@ FAST_CODE_NOINLINE void rcSmoothingSetFilterCutoffs(rcSmoothingFilter_t *smoothi
                 }
             }
         }
+
+        // initialize or update the Level filter
+        for (int i = FD_ROLL; i < FD_YAW; i++) {
+            if (!smoothingData->filterInitialized) {
+                pt3FilterInit(&smoothingData->filterDeflection[i], pt3FilterGain(smoothingData->setpointCutoffFrequency, dT));
+            } else {
+                pt3FilterUpdateCutoff(&smoothingData->filterDeflection[i], pt3FilterGain(smoothingData->setpointCutoffFrequency, dT));
+            }
+        }
     }
 
     // update or initialize the FF filter
     oldCutoff = smoothingData->feedforwardCutoffFrequency;
     if (rcSmoothingData.ffCutoffSetting == 0) {
-        smoothingData->feedforwardCutoffFrequency = calcAutoSmoothingCutoff(smoothingData->averageFrameTimeUs, smoothingData->autoSmoothnessFactorSetpoint);
+        smoothingData->feedforwardCutoffFrequency = MAX(RC_SMOOTHING_CUTOFF_MIN_HZ, calcAutoSmoothingCutoff(smoothingData->averageFrameTimeUs, smoothingData->autoSmoothnessFactorSetpoint));
     }
     if (!smoothingData->filterInitialized) {
         pidInitFeedforwardLpf(smoothingData->feedforwardCutoffFrequency, smoothingData->debugAxis);
@@ -457,7 +468,7 @@ static FAST_CODE void processRcSmoothingFilter(void)
             // If the filter cutoffs in auto mode, and we have good rx data, then determine the average rx frame rate
             // and use that to calculate the filter cutoff frequencies
             if ((currentTimeMs > RC_SMOOTHING_FILTER_STARTUP_DELAY_MS) && (targetPidLooptime > 0)) { // skip during FC initialization
-                if (rxIsReceivingSignal()  && rcSmoothingRxRateValid(currentRxRefreshRate)) {
+                if (rxIsReceivingSignal() && isRxRateValid) {
 
                     // set the guard time expiration if it's not set
                     if (validRxFrameTimeMs == 0) {
@@ -503,12 +514,10 @@ static FAST_CODE void processRcSmoothingFilter(void)
             }
 
             // rx frame rate training blackbox debugging
-            if (debugMode == DEBUG_RC_SMOOTHING_RATE) {
-                DEBUG_SET(DEBUG_RC_SMOOTHING_RATE, 0, currentRxRefreshRate);              // log each rx frame interval
-                DEBUG_SET(DEBUG_RC_SMOOTHING_RATE, 1, rcSmoothingData.training.count);    // log the training step count
-                DEBUG_SET(DEBUG_RC_SMOOTHING_RATE, 2, rcSmoothingData.averageFrameTimeUs);// the current calculated average
-                DEBUG_SET(DEBUG_RC_SMOOTHING_RATE, 3, sampleState);                       // indicates whether guard time is active
-            }
+            DEBUG_SET(DEBUG_RC_SMOOTHING_RATE, 0, currentRxRefreshRate);              // log each rx frame interval
+            DEBUG_SET(DEBUG_RC_SMOOTHING_RATE, 1, rcSmoothingData.training.count);    // log the training step count
+            DEBUG_SET(DEBUG_RC_SMOOTHING_RATE, 2, rcSmoothingData.averageFrameTimeUs);// the current calculated average
+            DEBUG_SET(DEBUG_RC_SMOOTHING_RATE, 3, sampleState);                       // indicates whether guard time is active
         }
         // Get new values to be smoothed
         for (int i = 0; i < PRIMARY_CHANNEL_COUNT; i++) {
@@ -537,6 +546,17 @@ static FAST_CODE void processRcSmoothingFilter(void)
             *dst = rxDataToSmooth[i];
         }
     }
+
+    // for ANGLE and HORIZON, smooth rcDeflection on pitch and roll to avoid setpoint steps
+    bool smoothingNeeded = (FLIGHT_MODE(ANGLE_MODE) || FLIGHT_MODE(HORIZON_MODE)) && rcSmoothingData.filterInitialized;
+    for (int axis = FD_ROLL; axis <= FD_YAW; axis++) {
+        if (smoothingNeeded && axis < FD_YAW) {
+            rcDeflectionSmoothed[axis] = pt3FilterApply(&rcSmoothingData.filterDeflection[axis], rcDeflection[axis]);
+        } else {
+            rcDeflectionSmoothed[axis] = rcDeflection[axis];
+        }
+    }
+
 }
 #endif // USE_RC_SMOOTHING_FILTER
 
@@ -553,9 +573,11 @@ FAST_CODE void processRcCommand(void)
     if (isRxDataNew) {
         for (int axis = FD_ROLL; axis <= FD_YAW; axis++) {
 
+#ifdef USE_FEEDFORWARD
             isDuplicate[axis] = (oldRcCommand[axis] == rcCommand[axis]);
-            rcCommandDelta[axis] = fabsf(rcCommand[axis] - oldRcCommand[axis]);
+            rcCommandDelta[axis] = (rcCommand[axis] - oldRcCommand[axis]);
             oldRcCommand[axis] = rcCommand[axis];
+#endif
 
             float angleRate;
             
@@ -587,11 +609,10 @@ FAST_CODE void processRcCommand(void)
             }
             rawSetpoint[axis] = constrainf(angleRate, -1.0f * currentControlRateProfile->rate_limit[axis], 1.0f * currentControlRateProfile->rate_limit[axis]);
             DEBUG_SET(DEBUG_ANGLERATE, axis, angleRate);
-        } 
-
-        // adjust un-filtered setpoint steps to camera angle (mixing Roll and Yaw)
+        }
+        // adjust raw setpoint steps to camera angle (mixing Roll and Yaw)
         if (rxConfig()->fpvCamAngleDegrees && IS_RC_MODE_ACTIVE(BOXFPVANGLEMIX) && !FLIGHT_MODE(HEADFREE_MODE)) {
-            scaleSetpointToFpvCamAngle();
+            scaleRawSetpointToFpvCamAngle();
         }
     }
 
@@ -605,20 +626,6 @@ FAST_CODE void processRcCommand(void)
 FAST_CODE_NOINLINE void updateRcCommands(void)
 {
     isRxDataNew = true;
-
-    // PITCH & ROLL only dynamic PID adjustment,  depending on throttle value
-    int32_t prop;
-    if (rcData[THROTTLE] < currentControlRateProfile->tpa_breakpoint) {
-        prop = 100;
-        throttlePIDAttenuation = 1.0f;
-    } else {
-        if (rcData[THROTTLE] < 2000) {
-            prop = 100 - (uint16_t)currentControlRateProfile->dynThrPID * (rcData[THROTTLE] - currentControlRateProfile->tpa_breakpoint) / (2000 - currentControlRateProfile->tpa_breakpoint);
-        } else {
-            prop = 100 - currentControlRateProfile->dynThrPID;
-        }
-        throttlePIDAttenuation = prop / 100.0f;
-    }
 
     for (int axis = 0; axis < 3; axis++) {
         // non coupled PID reduction scaler used in PID controller 1 and PID controller 2.

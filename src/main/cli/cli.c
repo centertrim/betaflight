@@ -146,6 +146,7 @@ bool cliMode = false;
 #include "pg/rx.h"
 #include "pg/rx_pwm.h"
 #include "pg/rx_spi_cc2500.h"
+#include "pg/rx_spi_expresslrs.h"
 #include "pg/serial_uart.h"
 #include "pg/sdio.h"
 #include "pg/timerio.h"
@@ -265,7 +266,7 @@ static const char * const featureNames[] = {
     "RANGEFINDER", "TELEMETRY", "", "3D", "RX_PARALLEL_PWM",
     "RX_MSP", "RSSI_ADC", "LED_STRIP", "DISPLAY", "OSD",
     "", "CHANNEL_FORWARDING", "TRANSPONDER", "AIRMODE",
-    "", "", "RX_SPI", "", "ESC_SENSOR", "ANTI_GRAVITY", "DYNAMIC_FILTER", NULL
+    "", "", "RX_SPI", "", "ESC_SENSOR", "ANTI_GRAVITY", "", NULL
 };
 
 // sync this with rxFailsafeChannelMode_e
@@ -309,6 +310,7 @@ static const char *mcuTypeNames[] = {
     "H7A3",
     "H723/H725",
     "G474",
+    "H730",
 };
 
 static const char *configurationStates[] = { "UNCONFIGURED", "CUSTOM DEFAULTS", "CONFIGURED" };
@@ -1560,7 +1562,7 @@ static void cliSerialPassthrough(const char *cmdName, char *cmdline)
         cliPrintLine("Port1 baud rate change over USB enabled.");
         // Register the right side baud rate setting routine with the left side which allows setting of the UART
         // baud rate over USB without setting it using the serialpassthrough command
-        serialSetBaudRateCb(ports[0].port, serialSetBaudRate, ports[1].port);
+        serialSetBaudRateCb(ports[1].port, serialSetBaudRate, ports[0].port);
     }
 
     char *resetMessage = "";
@@ -1585,11 +1587,10 @@ static void cliSerialPassthrough(const char *cmdName, char *cmdline)
         // pwmDisableMotors();
         motorDisable();
         delay(5);
-        unsigned motorsCount = getMotorCount();
-        for (unsigned i = 0; i < motorsCount; i++) {
+        for (unsigned i = 0; i < getMotorCount(); i++) {
             const ioTag_t tag = motorConfig()->dev.ioTags[i];
             if (tag) {
-                const timerHardware_t *timerHardware = timerGetByTag(tag);
+                const timerHardware_t *timerHardware = timerGetConfiguredByTag(tag);
                 if (timerHardware) {
                     IO_t io = IOGetByTag(tag);
                     IOInit(io, OWNER_MOTOR, 0);
@@ -2195,7 +2196,7 @@ static void cliServo(const char *cmdName, char *cmdline)
             arguments[MIN] < PWM_PULSE_MIN || arguments[MIN] > PWM_PULSE_MAX ||
             arguments[MAX] < PWM_PULSE_MIN || arguments[MAX] > PWM_PULSE_MAX ||
             arguments[MIDDLE] < arguments[MIN] || arguments[MIDDLE] > arguments[MAX] ||
-            arguments[MIN] > arguments[MAX] || arguments[MAX] < arguments[MIN] ||
+            arguments[MIN] > arguments[MAX] ||
             arguments[RATE] < -100 || arguments[RATE] > 100 ||
             arguments[FORWARD] >= MAX_SUPPORTED_RC_CHANNEL_COUNT
         ) {
@@ -3096,14 +3097,29 @@ static void cliVtxInfo(const char *cmdName, char *cmdline)
 }
 #endif // USE_VTX_TABLE
 
-#ifdef USE_SIMPLIFIED_TUNING
-static void cliApplySimplifiedTuning(const char *cmdName, char *cmdline)
+#if defined(USE_SIMPLIFIED_TUNING)
+static void applySimplifiedTuningAllProfiles(void)
 {
-    UNUSED(cmdName);
-    UNUSED(cmdline);
+    for (unsigned pidProfileIndex = 0; pidProfileIndex < PID_PROFILE_COUNT; pidProfileIndex++) {
+        applySimplifiedTuning(pidProfilesMutable(pidProfileIndex), gyroConfigMutable());
+    }
+}
 
-    applySimplifiedTuning(currentPidProfile);
-    cliPrintLine("Applied tuning based on simplified tuning settings.");
+static void cliSimplifiedTuning(const char *cmdName, char *cmdline)
+{
+    if (strcasecmp(cmdline, "apply") == 0) {
+        applySimplifiedTuningAllProfiles();
+
+        cliPrintLine("Applied simplified tuning.");
+    } else if (strcasecmp(cmdline, "disable") == 0) {
+        for (unsigned pidProfileIndex = 0; pidProfileIndex < PID_PROFILE_COUNT; pidProfileIndex++) {
+            disableSimplifiedTuning(pidProfilesMutable(pidProfileIndex), gyroConfigMutable());
+        }
+
+        cliPrintLine("Disabled simplified tuning.");
+    } else {
+        cliShowParseError(cmdName);
+    }
 }
 #endif
 
@@ -4261,6 +4277,10 @@ bool resetConfigToCustomDefaults(void)
 
     cliProcessCustomDefaults(true);
 
+#if defined(USE_SIMPLIFIED_TUNING)
+    applySimplifiedTuningAllProfiles();
+#endif
+
     return prepareSave();
 }
 
@@ -4413,6 +4433,10 @@ static void cliDefaults(const char *cmdName, char *cmdline)
     if (useCustomDefaults) {
         cliProcessCustomDefaults(false);
     }
+#endif
+
+#if defined(USE_SIMPLIFIED_TUNING)
+    applySimplifiedTuningAllProfiles();
 #endif
 
     if (parameterGroupId) {
@@ -4705,7 +4729,7 @@ STATIC_UNIT_TESTED void cliSet(const char *cmdName, char *cmdline)
 
 static const char *getMcuTypeById(mcuTypeId_e id)
 {
-    if (id < MCU_TYPE_UNKNOWN) {
+    if (id < ARRAYLEN(mcuTypeNames)) {
         return mcuTypeNames[id];
     } else {
         return "UNKNOWN";
@@ -4783,6 +4807,19 @@ static void cliStatus(const char *cmdName, char *cmdline)
             cliPrintf(" gyro %d", pos + 1);
         }
     }
+#ifdef USE_SPI
+#ifdef USE_GYRO_EXTI
+    if (gyroActiveDev()->gyroModeSPI != GYRO_EXTI_NO_INT) {
+        cliPrintf(" locked");
+    }
+    if (gyroActiveDev()->gyroModeSPI == GYRO_EXTI_INT_DMA) {
+        cliPrintf(" dma");
+    }
+#endif
+    if (spiGetExtDeviceCount(&gyroActiveDev()->dev) > 1) {
+        cliPrintf(" shared");
+    }
+#endif
     cliPrintLinefeed();
 
 #if defined(USE_SENSOR_NAMES)
@@ -4868,12 +4905,10 @@ static void cliStatus(const char *cmdName, char *cmdline)
     cliPrintLinefeed();
 }
 
-#if defined(USE_TASK_STATISTICS)
 static void cliTasks(const char *cmdName, char *cmdline)
 {
     UNUSED(cmdName);
     UNUSED(cmdline);
-    int maxLoadSum = 0;
     int averageLoadSum = 0;
 
 #ifndef MINIMAL_CLI
@@ -4891,24 +4926,23 @@ static void cliTasks(const char *cmdName, char *cmdline)
         taskInfo_t taskInfo;
         getTaskInfo(taskId, &taskInfo);
         if (taskInfo.isEnabled) {
-            int taskFrequency = taskInfo.averageDeltaTimeUs == 0 ? 0 : lrintf(1e6f / taskInfo.averageDeltaTimeUs);
+            int taskFrequency = taskInfo.averageDeltaTime10thUs == 0 ? 0 : lrintf(1e7f / taskInfo.averageDeltaTime10thUs);
             cliPrintf("%02d - (%15s) ", taskId, taskInfo.taskName);
-            const int maxLoad = taskInfo.maxExecutionTimeUs == 0 ? 0 :(taskInfo.maxExecutionTimeUs * taskFrequency + 5000) / 1000;
-            const int averageLoad = taskInfo.averageExecutionTimeUs == 0 ? 0 : (taskInfo.averageExecutionTimeUs * taskFrequency + 5000) / 1000;
+            const int maxLoad = taskInfo.maxExecutionTimeUs == 0 ? 0 : (taskInfo.maxExecutionTimeUs * taskFrequency) / 1000;
+            const int averageLoad = taskInfo.averageExecutionTime10thUs == 0 ? 0 : (taskInfo.averageExecutionTime10thUs * taskFrequency) / 10000;
             if (taskId != TASK_SERIAL) {
-                maxLoadSum += maxLoad;
                 averageLoadSum += averageLoad;
             }
             if (systemConfig()->task_statistics) {
 #if defined(USE_LATE_TASK_STATISTICS)
                 cliPrintLinef("%6d %7d %7d %4d.%1d%% %4d.%1d%% %9d %6d %6d %7d",
-                        taskFrequency, taskInfo.maxExecutionTimeUs, taskInfo.averageExecutionTimeUs,
+                        taskFrequency, taskInfo.maxExecutionTimeUs, taskInfo.averageExecutionTime10thUs / 10,
                         maxLoad/10, maxLoad%10, averageLoad/10, averageLoad%10,
                         taskInfo.totalExecutionTimeUs / 1000,
                         taskInfo.lateCount, taskInfo.runCount, taskInfo.execTime);
 #else
                 cliPrintLinef("%6d %7d %7d %4d.%1d%% %4d.%1d%% %9d",
-                        taskFrequency, taskInfo.maxExecutionTimeUs, taskInfo.averageExecutionTimeUs,
+                        taskFrequency, taskInfo.maxExecutionTimeUs, taskInfo.averageExecutionTime10thUs / 10,
                         maxLoad/10, maxLoad%10, averageLoad/10, averageLoad%10,
                         taskInfo.totalExecutionTimeUs / 1000);
 #endif
@@ -4923,11 +4957,15 @@ static void cliTasks(const char *cmdName, char *cmdline)
         cfCheckFuncInfo_t checkFuncInfo;
         getCheckFuncInfo(&checkFuncInfo);
         cliPrintLinef("RX Check Function %19d %7d %25d", checkFuncInfo.maxExecutionTimeUs, checkFuncInfo.averageExecutionTimeUs, checkFuncInfo.totalExecutionTimeUs / 1000);
-        cliPrintLinef("Total (excluding SERIAL) %25d.%1d%% %4d.%1d%%", maxLoadSum/10, maxLoadSum%10, averageLoadSum/10, averageLoadSum%10);
+        cliPrintLinef("Total (excluding SERIAL) %33d.%1d%%", averageLoadSum/10, averageLoadSum%10);
+        if (debugMode == DEBUG_SCHEDULER_DETERMINISM) {
+            extern int32_t schedLoopStartCycles, taskGuardCycles;
+
+            cliPrintLinef("Scheduler start cycles %d guard cycles %d", schedLoopStartCycles, taskGuardCycles);
+        }
         schedulerResetCheckFunctionMaxExecutionTime();
     }
 }
-#endif
 
 static void printVersion(const char *cmdName, bool printBoardInfo)
 {
@@ -5019,7 +5057,7 @@ static void cliRcSmoothing(const char *cmdName, char *cmdline)
             cliPrintLine("(auto)");
         }
         cliPrintf("# Active throttle cutoff: %dhz ", rcSmoothingData->throttleCutoffFrequency);
-        if (rcSmoothingData->ffCutoffSetting) {
+        if (rcSmoothingData->throttleCutoffSetting) {
             cliPrintLine("(manual)");
         } else {
             cliPrintLine("(auto)");
@@ -5032,7 +5070,7 @@ static void cliRcSmoothing(const char *cmdName, char *cmdline)
 
 #if defined(USE_RESOURCE_MGMT)
 
-#define MAX_RESOURCE_INDEX(x) ((x) == 0 ? 1 : (x))
+#define RESOURCE_VALUE_MAX_INDEX(x) ((x) == 0 ? 1 : (x))
 
 typedef struct {
     const uint8_t owner;
@@ -5162,6 +5200,10 @@ const cliResourceValue_t resourceTable[] = {
     DEFS( OWNER_RX_SPI_CC2500_ANT_SEL, PG_RX_CC2500_SPI_CONFIG, rxCc2500SpiConfig_t, antSelIoTag ),
 #endif
 #endif
+#if defined(USE_RX_EXPRESSLRS)
+    DEFS( OWNER_RX_SPI_EXPRESSLRS_RESET, PG_RX_EXPRESSLRS_SPI_CONFIG, rxExpressLrsSpiConfig_t, resetIoTag ),
+    DEFS( OWNER_RX_SPI_EXPRESSLRS_BUSY, PG_RX_EXPRESSLRS_SPI_CONFIG, rxExpressLrsSpiConfig_t, busyIoTag ),
+#endif
 #endif
 #ifdef USE_GYRO_EXTI
     DEFW( OWNER_GYRO_EXTI,     PG_GYRO_DEVICE_CONFIG, gyroDeviceConfig_t, extiTag, MAX_GYRODEV_COUNT ),
@@ -5208,7 +5250,7 @@ static void printResource(dumpFlags_t dumpMask, const char *headingStr)
             defaultConfig = NULL;
         }
 
-        for (int index = 0; index < MAX_RESOURCE_INDEX(resourceTable[i].maxIndex); index++) {
+        for (int index = 0; index < RESOURCE_VALUE_MAX_INDEX(resourceTable[i].maxIndex); index++) {
             const ioTag_t ioTag = *(ioTag_t *)((const uint8_t *)currentConfig + resourceTable[i].stride * index + resourceTable[i].offset);
             ioTag_t ioTagDefault = NULL;
             if (defaultConfig) {
@@ -5250,7 +5292,7 @@ static void resourceCheck(uint8_t resourceIndex, uint8_t index, ioTag_t newTag)
 
     const char * format = "\r\nNOTE: %c%02d already assigned to ";
     for (int r = 0; r < (int)ARRAYLEN(resourceTable); r++) {
-        for (int i = 0; i < MAX_RESOURCE_INDEX(resourceTable[r].maxIndex); i++) {
+        for (int i = 0; i < RESOURCE_VALUE_MAX_INDEX(resourceTable[r].maxIndex); i++) {
             ioTag_t *tag = getIoTag(resourceTable[r], i);
             if (*tag == newTag) {
                 bool cleared = false;
@@ -5355,14 +5397,17 @@ typedef struct dmaoptEntry_s {
     { device, peripheral, pgn, sizeof(type), offsetof(type, member), max, mask }
 
 dmaoptEntry_t dmaoptEntryTable[] = {
-    DEFW("SPI_TX",  DMA_PERIPH_SPI_TX,  PG_SPI_PIN_CONFIG,     spiPinConfig_t,     txDmaopt, SPIDEV_COUNT,                    MASK_IGNORED),
-    DEFW("SPI_RX",  DMA_PERIPH_SPI_RX,  PG_SPI_PIN_CONFIG,     spiPinConfig_t,     rxDmaopt, SPIDEV_COUNT,                    MASK_IGNORED),
-    DEFA("ADC",     DMA_PERIPH_ADC,     PG_ADC_CONFIG,         adcConfig_t,        dmaopt,   ADCDEV_COUNT,                    MASK_IGNORED),
-    DEFS("SDIO",    DMA_PERIPH_SDIO,    PG_SDIO_CONFIG,        sdioConfig_t,       dmaopt),
-    DEFW("UART_TX", DMA_PERIPH_UART_TX, PG_SERIAL_UART_CONFIG, serialUartConfig_t, txDmaopt, UARTDEV_CONFIG_MAX,              MASK_IGNORED),
-    DEFW("UART_RX", DMA_PERIPH_UART_RX, PG_SERIAL_UART_CONFIG, serialUartConfig_t, rxDmaopt, UARTDEV_CONFIG_MAX,              MASK_IGNORED),
+    DEFW("SPI_MOSI", DMA_PERIPH_SPI_MOSI, PG_SPI_PIN_CONFIG,     spiPinConfig_t,     txDmaopt, SPIDEV_COUNT,                    MASK_IGNORED),
+    DEFW("SPI_MISO", DMA_PERIPH_SPI_MISO, PG_SPI_PIN_CONFIG,     spiPinConfig_t,     rxDmaopt, SPIDEV_COUNT,                    MASK_IGNORED),
+    // SPI_TX/SPI_RX for backwards compatibility with unified configs defined for 4.2.x
+    DEFW("SPI_TX",   DMA_PERIPH_SPI_MOSI, PG_SPI_PIN_CONFIG,     spiPinConfig_t,     txDmaopt, SPIDEV_COUNT,                    MASK_IGNORED),
+    DEFW("SPI_RX",   DMA_PERIPH_SPI_MISO, PG_SPI_PIN_CONFIG,     spiPinConfig_t,     rxDmaopt, SPIDEV_COUNT,                    MASK_IGNORED),
+    DEFA("ADC",      DMA_PERIPH_ADC,      PG_ADC_CONFIG,         adcConfig_t,        dmaopt,   ADCDEV_COUNT,                    MASK_IGNORED),
+    DEFS("SDIO",     DMA_PERIPH_SDIO,     PG_SDIO_CONFIG,        sdioConfig_t,       dmaopt),
+    DEFW("UART_TX",  DMA_PERIPH_UART_TX,  PG_SERIAL_UART_CONFIG, serialUartConfig_t, txDmaopt, UARTDEV_CONFIG_MAX,              MASK_IGNORED),
+    DEFW("UART_RX",  DMA_PERIPH_UART_RX,  PG_SERIAL_UART_CONFIG, serialUartConfig_t, rxDmaopt, UARTDEV_CONFIG_MAX,              MASK_IGNORED),
 #if defined(STM32H7) || defined(STM32G4)
-    DEFW("TIMUP",   DMA_PERIPH_TIMUP,   PG_TIMER_UP_CONFIG,    timerUpConfig_t,    dmaopt,   HARDWARE_TIMER_DEFINITION_COUNT, TIMUP_TIMERS),
+    DEFW("TIMUP",    DMA_PERIPH_TIMUP,    PG_TIMER_UP_CONFIG,    timerUpConfig_t,    dmaopt,   HARDWARE_TIMER_DEFINITION_COUNT, TIMUP_TIMERS),
 #endif
 };
 
@@ -5619,7 +5664,7 @@ static void cliDmaopt(const char *cmdName, char *cmdline)
     const timerHardware_t *timer = NULL;
     pch = strtok_r(NULL, " ", &saveptr);
     if (entry) {
-        index = atoi(pch) - 1;
+        index = pch ? (atoi(pch) - 1) : -1;
         if (index < 0 || index >= entry->maxIndex || (entry->presenceMask != MASK_IGNORED && !(entry->presenceMask & BIT(index + 1)))) {
             cliPrintErrorLinef(cmdName, "BAD INDEX: '%s'", pch ? pch : "");
             return;
@@ -5646,7 +5691,7 @@ static void cliDmaopt(const char *cmdName, char *cmdline)
 #if defined(USE_TIMER_MGMT)
         timerIoConfig = timerIoConfigByTag(ioTag);
 #endif
-        timer = timerGetByTag(ioTag);
+        timer = timerGetConfiguredByTag(ioTag);
     }
 
     // opt or list
@@ -5864,7 +5909,8 @@ static void showTimers(void)
         cliPrintf("TIM%d:", timerNumber);
         bool timerUsed = false;
         for (unsigned timerIndex = 0; timerIndex < CC_CHANNELS_PER_TIMER; timerIndex++) {
-            const resourceOwner_t *timerOwner = timerGetOwner(timerNumber, CC_CHANNEL_FROM_INDEX(timerIndex));
+            const timerHardware_t *timer = timerGetAllocatedByNumberAndChannel(timerNumber, CC_CHANNEL_FROM_INDEX(timerIndex));
+            const resourceOwner_t *timerOwner = timerGetOwner(timer);
             if (timerOwner->owner) {
                 if (!timerUsed) {
                     timerUsed = true;
@@ -5873,9 +5919,9 @@ static void showTimers(void)
                 }
 
                 if (timerOwner->resourceIndex > 0) {
-                    cliPrintLinef("    CH%d: %s %d", timerIndex + 1, ownerNames[timerOwner->owner], timerOwner->resourceIndex);
+                    cliPrintLinef("    CH%d%s: %s %d", timerIndex + 1, timer->output & TIMER_OUTPUT_N_CHANNEL ? "N" : " ", ownerNames[timerOwner->owner], timerOwner->resourceIndex);
                 } else {
-                    cliPrintLinef("    CH%d: %s", timerIndex + 1, ownerNames[timerOwner->owner]);
+                    cliPrintLinef("    CH%d%s: %s", timerIndex + 1, timer->output & TIMER_OUTPUT_N_CHANNEL ? "N" : " ", ownerNames[timerOwner->owner]);
                 }
             }
         }
@@ -6066,8 +6112,8 @@ static void cliResource(const char *cmdName, char *cmdline)
     int index = atoi(pch);
 
     if (resourceTable[resourceIndex].maxIndex > 0 || index > 0) {
-        if (index <= 0 || index > MAX_RESOURCE_INDEX(resourceTable[resourceIndex].maxIndex)) {
-            cliShowArgumentRangeError(cmdName, "INDEX", 1, MAX_RESOURCE_INDEX(resourceTable[resourceIndex].maxIndex));
+        if (index <= 0 || index > RESOURCE_VALUE_MAX_INDEX(resourceTable[resourceIndex].maxIndex)) {
+            cliShowArgumentRangeError(cmdName, "INDEX", 1, RESOURCE_VALUE_MAX_INDEX(resourceTable[resourceIndex].maxIndex));
             return;
         }
         index -= 1;
@@ -6444,9 +6490,6 @@ static void cliHelp(const char *cmdName, char *cmdline);
 // should be sorted a..z for bsearch()
 const clicmd_t cmdTable[] = {
     CLI_COMMAND_DEF("adjrange", "configure adjustment ranges", "<index> <unused> <range channel> <start> <end> <function> <select channel> [<center> <scale>]", cliAdjustmentRange),
-#ifdef USE_SIMPLIFIED_TUNING
-    CLI_COMMAND_DEF("apply_simplified_tuning", "applies tuning based on simplified tuning settings", NULL, cliApplySimplifiedTuning),
-#endif
     CLI_COMMAND_DEF("aux", "configure modes", "<index> <mode> <aux> <start> <end> <logic>", cliAux),
 #ifdef USE_CLI_BATCH
     CLI_COMMAND_DEF("batch", "start or end a batch of commands", "start | end", cliBatch),
@@ -6577,6 +6620,9 @@ const clicmd_t cmdTable[] = {
 #if defined(USE_SIGNATURE)
     CLI_COMMAND_DEF("signature", "get / set the board type signature", "[signature]", cliSignature),
 #endif
+#if defined(USE_SIMPLIFIED_TUNING)
+    CLI_COMMAND_DEF("simplified_tuning", "applies or disables simplified tuning", "apply | disable", cliSimplifiedTuning),
+#endif
 #ifdef USE_SERVOS
     CLI_COMMAND_DEF("smix", "servo mixer", "<rule> <servo> <source> <rate> <speed> <min> <max> <box>\r\n"
         "\treset\r\n"
@@ -6584,9 +6630,7 @@ const clicmd_t cmdTable[] = {
         "\treverse <servo> <source> r|n", cliServoMix),
 #endif
     CLI_COMMAND_DEF("status", "show status", NULL, cliStatus),
-#if defined(USE_TASK_STATISTICS)
     CLI_COMMAND_DEF("tasks", "show task stats", NULL, cliTasks),
-#endif
 #ifdef USE_TIMER_MGMT
     CLI_COMMAND_DEF("timer", "show/set timers", "<> | <pin> list | <pin> [af<alternate function>|none|<option(deprecated)>] | list | show", cliTimer),
 #endif
@@ -6831,8 +6875,6 @@ void cliEnter(serialPort_t *serialPort)
     setPrintfSerialPort(cliPort);
     cliWriter = bufWriterInit(cliWriteBuffer, sizeof(cliWriteBuffer), (bufWrite_t)serialWriteBufShim, serialPort);
     cliErrorWriter = cliWriter;
-
-    schedulerSetCalulateTaskStatistics(systemConfig()->task_statistics);
 
 #ifndef MINIMAL_CLI
     cliPrintLine("\r\nEntering CLI Mode, type 'exit' to return, or 'help'");
