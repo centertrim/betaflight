@@ -141,7 +141,7 @@ static void calculateThrottleAndCurrentMotorEndpoints(timeUs_t currentTimeUs)
 
     float currentThrottleInputRange = 0;
 
-    if (featureIsEnabled(FEATURE_3D)) {
+    if (mixerRuntime.feature3dEnabled) {
         uint16_t rcCommand3dDeadBandLow;
         uint16_t rcCommand3dDeadBandHigh;
 
@@ -165,7 +165,7 @@ static void calculateThrottleAndCurrentMotorEndpoints(timeUs_t currentTimeUs)
 
         const float rcCommandThrottleRange3dLow = rcCommand3dDeadBandLow - PWM_RANGE_MIN;
         const float rcCommandThrottleRange3dHigh = PWM_RANGE_MAX - rcCommand3dDeadBandHigh;
-//Low Throttle
+	//Low Throttle
         if (rcPreviousth <= rcCommand3dDeadBandLow || isFlipOverAfterCrashActive()) {
             // INVERTED
             motorRangeMin = mixerRuntime.motorOutputLow;
@@ -184,7 +184,7 @@ static void calculateThrottleAndCurrentMotorEndpoints(timeUs_t currentTimeUs)
             rcThrottlePrevious = rcPreviousth;
             newmotorOutputMixSign = -1;
             currentThrottleInputRange = rcCommandThrottleRange3dLow;
-//High Throttle
+	//High Throttle
         } else if (rcPreviousth >= rcCommand3dDeadBandHigh) {
             // NORMAL
             motorRangeMin = mixerRuntime.deadbandMotor3dHigh;
@@ -195,7 +195,7 @@ static void calculateThrottleAndCurrentMotorEndpoints(timeUs_t currentTimeUs)
             throttle = rcPreviousth - rcCommand3dDeadBandHigh;
             newmotorOutputMixSign = 1;
             currentThrottleInputRange = rcCommandThrottleRange3dHigh;
-//Deadband LOW
+	//Deadband LOW
         } else if ((rcThrottlePrevious <= rcCommand3dDeadBandLow &&
                 !flight3DConfigMutable()->switched_mode3d) ||
                 isMotorsReversed()) {
@@ -214,7 +214,7 @@ static void calculateThrottleAndCurrentMotorEndpoints(timeUs_t currentTimeUs)
                 motorOutputMin = mixerRuntime.deadbandMotor3dLow;
                 motorOutputRange = mixerRuntime.motorOutputLow - mixerRuntime.deadbandMotor3dLow;
             }
-//Deadband HIGH
+	//Deadband HIGH
         } else {
             // NORMAL_TO_DEADBAND
             throttle = 0;
@@ -224,7 +224,7 @@ static void calculateThrottleAndCurrentMotorEndpoints(timeUs_t currentTimeUs)
             motorOutputMin = mixerRuntime.deadbandMotor3dHigh;
             motorOutputRange = mixerRuntime.motorOutputHigh - mixerRuntime.deadbandMotor3dHigh;
             }
-//Motor Reversal Initiated
+	//Motor Reversal Initiated
         if (motorOutputMixSign != newmotorOutputMixSign) {
             motorOutputMixSign = newmotorOutputMixSign;
             syncphasetwo = false;
@@ -246,7 +246,7 @@ static void calculateThrottleAndCurrentMotorEndpoints(timeUs_t currentTimeUs)
                }
             }
         }
-// RPM Sync reversal in process
+	// RPM Sync reversal in process
         if ( reversalInProcess ){
             for (int i = 0; i < mixerRuntime.motorCount; i++) {
                  if ( !motorsynccomplete[i] ){
@@ -273,12 +273,12 @@ static void calculateThrottleAndCurrentMotorEndpoints(timeUs_t currentTimeUs)
                  else if (getDshotTelemetry(i) < syncspeed) idlethrottle[i] = constrain(++idlethrottle[i],50,100); //,50,125);
                  else idlethrottle[i] = constrain(--idlethrottle[i],50,100); //,50,125);
            }
-// Reversal Complete
+	   // Reversal Complete
            if ( currentTimeUs >= reversalTimeUs && reversalInProcess ) {
                pidResetIterm();  //kbi v10
                reversalInProcess = false;
            }
-// RPM Sync time to stabilize after reversal is complete, default = 50Ms
+	// RPM Sync time to stabilize after reversal is complete, default = 50Ms
         }
         if (stabilizeTimeInProcess){
             if ( currentTimeUs >= reversalTimeUs + stabilizeTimeUs && stabilizeTimeInProcess ) {
@@ -317,7 +317,9 @@ static void calculateThrottleAndCurrentMotorEndpoints(timeUs_t currentTimeUs)
             pidResetIterm();  //KBI V10
         }
     } else {
+	// NORMAL mode (non-3D)
         throttle = rcCommand[THROTTLE] - PWM_RANGE_MIN + throttleAngleCorrection;
+	currentThrottleInputRange = PWM_RANGE;
 #if defined(USE_BATTERY_VOLTAGE_SAG_COMPENSATION)
         float motorRangeAttenuationFactor = 0;
         // reduce motorRangeMax when battery is full
